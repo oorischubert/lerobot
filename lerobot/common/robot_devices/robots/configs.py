@@ -443,7 +443,7 @@ class So100RobotConfig(ManipulatorRobotConfig):
     leader_arms: dict[str, MotorsBusConfig] = field(
         default_factory=lambda: {
             "main": FeetechMotorsBusConfig(
-                port="/dev/tty.usbmodem58760431091",
+                port="/dev/tty.usbmodem58FA0964001", # Oori Leader
                 motors={
                     # name: (index, model)
                     "shoulder_pan": [1, "sts3215"],
@@ -452,7 +452,7 @@ class So100RobotConfig(ManipulatorRobotConfig):
                     "wrist_flex": [4, "sts3215"],
                     "wrist_roll": [5, "sts3215"],
                     "gripper": [6, "sts3215"],
-                },
+                }, # type: ignore
             ),
         }
     )
@@ -460,7 +460,7 @@ class So100RobotConfig(ManipulatorRobotConfig):
     follower_arms: dict[str, MotorsBusConfig] = field(
         default_factory=lambda: {
             "main": FeetechMotorsBusConfig(
-                port="/dev/tty.usbmodem585A0076891",
+                port="/dev/tty.usbmodem58FA0957951", # Oori Follower 
                 motors={
                     # name: (index, model)
                     "shoulder_pan": [1, "sts3215"],
@@ -469,7 +469,7 @@ class So100RobotConfig(ManipulatorRobotConfig):
                     "wrist_flex": [4, "sts3215"],
                     "wrist_roll": [5, "sts3215"],
                     "gripper": [6, "sts3215"],
-                },
+                }, # type: ignore
             ),
         }
     )
@@ -491,6 +491,98 @@ class So100RobotConfig(ManipulatorRobotConfig):
         }
     )
 
+    mock: bool = False
+    
+@RobotConfig.register_subclass("so100_bimanual")
+@dataclass
+class So100BimanualRobotConfig(ManipulatorRobotConfig):
+    calibration_dir: str = ".cache/calibration/so100_bimanual"
+    # `max_relative_target` limits the magnitude of the relative positional target vector for safety purposes.
+    # Set this to a positive scalar to have the same value for all motors, or a list that is the same length as
+    # the number of motors in your follower arms.
+    max_relative_target: int | None = None
+
+    leader_arms: dict[str, MotorsBusConfig] = field(
+        default_factory=lambda: {
+            "left": FeetechMotorsBusConfig(
+                port="/dev/tty.usbmodem58FA0964001", # Oori Leader Left
+                motors={
+                    # name: (index, model)
+                    "shoulder_pan": [1, "sts3215"],
+                    "shoulder_lift": [2, "sts3215"],
+                    "elbow_flex": [3, "sts3215"],
+                    "wrist_flex": [4, "sts3215"],
+                    "wrist_roll": [5, "sts3215"],
+                    "gripper": [6, "sts3215"],
+                }, # type: ignore
+            ),
+            "right": FeetechMotorsBusConfig(
+                port="/dev/tty.usbmodem575E0031751",
+                motors={
+                    # name: (index, model)
+                    "shoulder_pan": [1, "sts3215"],
+                    "shoulder_lift": [2, "sts3215"],
+                    "elbow_flex": [3, "sts3215"],
+                    "wrist_flex": [4, "sts3215"],
+                    "wrist_roll": [5, "sts3215"],
+                    "gripper": [6, "sts3215"],
+                }, # type: ignore
+            ),
+        }
+    )
+
+    follower_arms: dict[str, MotorsBusConfig] = field(
+        default_factory=lambda: {
+            "left": FeetechMotorsBusConfig(
+                port="/dev/tty.usbmodem58FA0957951", # Oori Follower Left
+                motors={
+                    # name: (index, model)
+                    "shoulder_pan": [1, "sts3215"],
+                    "shoulder_lift": [2, "sts3215"],
+                    "elbow_flex": [3, "sts3215"],
+                    "wrist_flex": [4, "sts3215"],
+                    "wrist_roll": [5, "sts3215"],
+                    "gripper": [6, "sts3215"],
+                }, # type: ignore
+            ),
+            "right": FeetechMotorsBusConfig(
+                port="/dev/tty.usbmodem575E0032081",
+                motors={
+                    # name: (index, model)
+                    "shoulder_pan": [1, "sts3215"],
+                    "shoulder_lift": [2, "sts3215"],
+                    "elbow_flex": [3, "sts3215"],
+                    "wrist_flex": [4, "sts3215"],
+                    "wrist_roll": [5, "sts3215"],
+                    "gripper": [6, "sts3215"],
+                }, # type: ignore
+            ),
+        }
+    )
+
+    cameras: dict[str, CameraConfig] = field(
+        default_factory=lambda: {
+            "wrist_left": OpenCVCameraConfig(
+                camera_index=0,
+                fps=30,
+                width=640,
+                height=480,
+            ),
+            "wrist_right": OpenCVCameraConfig(
+                camera_index=1,
+                fps=30,
+                width=640,
+                height=480,
+            ),
+            "head": IntelRealSenseCameraConfig(
+                name="Intel RealSense D435",
+                fps=30,
+                width=640,
+                height=480,
+                rotation=90,
+            ),
+        }
+    )
     mock: bool = False
 
 
