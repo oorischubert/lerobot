@@ -471,9 +471,19 @@ class ManipulatorRobot:
                 present_pos = torch.from_numpy(present_pos)
                 goal_pos = ensure_safe_goal_position(goal_pos, present_pos, self.config.max_relative_target)
 
-            # Used when record_data=True
-            follower_goal_pos[name] = goal_pos
+            # MIRRORING CORRECTION FOR SO100_BIMANUAL LEFT GRIPPER
+            # The left gripper on so100_bimanual is physically mirrored, but we want the software
+            # to always treat it as non-mirrored. This flips the sign of the gripper goal position
+            # so that teleoperation and action commands are consistent regardless of hardware setup.
+            if self.robot_type == "so100_bimanual" and name == "left":
+                motor_names = self.follower_arms[name].motor_names
+                if "gripper" in motor_names:
+                    gripper_idx = motor_names.index("gripper")
+                    goal_pos = goal_pos.clone()
+                    goal_pos[gripper_idx] = -goal_pos[gripper_idx]
+            # END MIRRORING CORRECTION
 
+            follower_goal_pos[name] = goal_pos
             goal_pos = goal_pos.numpy().astype(np.float32)
             self.follower_arms[name].write("Goal_Position", goal_pos)
             self.logs[f"write_follower_{name}_goal_pos_dt_s"] = time.perf_counter() - before_fwrite_t
@@ -580,25 +590,30 @@ class ManipulatorRobot:
         to_idx = 0
         action_sent = []
         for name in self.follower_arms:
-            # Get goal position of each follower arm by splitting the action vector
             to_idx += len(self.follower_arms[name].motor_names)
             goal_pos = action[from_idx:to_idx]
             from_idx = to_idx
 
             # Cap goal position when too far away from present position.
-            # Slower fps expected due to reading from the follower.
             if self.config.max_relative_target is not None:
                 present_pos = self.follower_arms[name].read("Present_Position")
                 present_pos = torch.from_numpy(present_pos)
                 goal_pos = ensure_safe_goal_position(goal_pos, present_pos, self.config.max_relative_target)
 
-            # Save tensor to concat and return
+            # MIRRORING CORRECTION FOR SO100_BIMANUAL LEFT GRIPPER
+            # The left gripper on so100_bimanual is physically mirrored, but we want the software
+            # to always treat it as non-mirrored. This flips the sign of the gripper goal position
+            # so that teleoperation and action commands are consistent regardless of hardware setup.
+            if self.robot_type == "so100_bimanual" and name == "left":
+                motor_names = self.follower_arms[name].motor_names
+                if "gripper" in motor_names:
+                    gripper_idx = motor_names.index("gripper")
+                    goal_pos = goal_pos.clone()
+                    goal_pos[gripper_idx] = -goal_pos[gripper_idx]
+            # END MIRRORING CORRECTION
+
             action_sent.append(goal_pos)
-
-            # Send goal position to each follower
-            goal_pos = goal_pos.numpy().astype(np.float32)
-            self.follower_arms[name].write("Goal_Position", goal_pos)
-
+            self.follower_arms[name].write("Goal_Position", goal_pos.numpy().astype(np.float32))
         return torch.cat(action_sent)
 
     def print_logs(self):
