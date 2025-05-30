@@ -20,9 +20,12 @@ and send orders to its motors.
 
 import json
 import logging
+import socket
+import struct
 import time
 import warnings
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import torch
@@ -157,6 +160,9 @@ class ManipulatorRobot:
     def __init__(
         self,
         config: ManipulatorRobotConfig,
+        teleop_network_mode: Optional[str] = None,  # 'leader', 'follower', or None
+        teleop_host: str = 'localhost',
+        teleop_port: int = 50007,
     ):
         self.config = config
         self.robot_type = self.config.type
@@ -166,6 +172,40 @@ class ManipulatorRobot:
         self.cameras = make_cameras_from_configs(self.config.cameras)
         self.is_connected = False
         self.logs = {}
+        # Socket teleop
+        self.teleop_network_mode = teleop_network_mode
+        self.teleop_host = teleop_host
+        self.teleop_port = teleop_port
+        self._teleop_socket = None
+        self._teleop_conn = None
+        if self.teleop_network_mode:
+            self._setup_teleop_socket()
+
+    def _setup_teleop_socket(self):
+        if self.teleop_network_mode == 'leader':
+            self._teleop_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self._teleop_socket.connect((self.teleop_host, self.teleop_port))
+        elif self.teleop_network_mode == 'follower':
+            self._teleop_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self._teleop_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self._teleop_socket.bind((self.teleop_host, self.teleop_port))
+            self._teleop_socket.listen(1)
+            self._teleop_conn, _ = self._teleop_socket.accept()
+        # else: do nothing
+
+    def _close_teleop_socket(self):
+        if self._teleop_conn:
+            try:
+                self._teleop_conn.close()
+            except Exception:
+                pass
+            self._teleop_conn = None
+        if self._teleop_socket:
+            try:
+                self._teleop_socket.close()
+            except Exception:
+                pass
+            self._teleop_socket = None
 
     def get_motor_names(self, arm: dict[str, MotorsBus]) -> list:
         return [f"{arm}_{motor}" for arm, bus in arm.items() for motor in bus.motors]
@@ -345,7 +385,7 @@ class ManipulatorRobot:
             # rotate more than 360 degrees (from 0 to 4095) And some mistake can happen while assembling the arm,
             # you could end up with a servo with a position 0 or 4095 at a crucial point See [
             # https://emanual.robotis.com/docs/en/dxl/x/x_series/#operating-mode11]
-            all_motors_except_gripper = [name for name in arm.motor_names if name != "gripper"]
+            all_motors_except_gripper = [name for name in arm.motor_names if name != "gripper"]  # type: ignore
             if len(all_motors_except_gripper) > 0:
                 # 4 corresponds to Extended Position on Koch motors
                 arm.write("Operating_Mode", 4, all_motors_except_gripper)
@@ -381,11 +421,11 @@ class ManipulatorRobot:
             # Set secondary/shadow ID for shoulder and elbow. These joints have two motors.
             # As a result, if only one of them is required to move to a certain position,
             # the other will follow. This is to avoid breaking the motors.
-            if "shoulder_shadow" in arm.motor_names:
+            if "shoulder_shadow" in arm.motor_names:  # type: ignore
                 shoulder_idx = arm.read("ID", "shoulder")
                 arm.write("Secondary_ID", shoulder_idx, "shoulder_shadow")
 
-            if "elbow_shadow" in arm.motor_names:
+            if "elbow_shadow" in arm.motor_names:  # type: ignore
                 elbow_idx = arm.read("ID", "elbow")
                 arm.write("Secondary_ID", elbow_idx, "elbow_shadow")
 
@@ -405,7 +445,7 @@ class ManipulatorRobot:
             # https://emanual.robotis.com/docs/en/dxl/x/x_series/#operating-mode11]
             all_motors_except_gripper = [
                 name for name in self.follower_arms[name].motor_names if name != "gripper"
-            ]
+            ]  # type: ignore
             if len(all_motors_except_gripper) > 0:
                 # 4 corresponds to Extended Position on Aloha motors
                 self.follower_arms[name].write("Operating_Mode", 4, all_motors_except_gripper)
@@ -450,87 +490,150 @@ class ManipulatorRobot:
                 "ManipulatorRobot is not connected. You need to run `robot.connect()`."
             )
 
-        # Prepare to assign the position of the leader to the follower
-        leader_pos = {}
-        for name in self.leader_arms:
+        # --- SOCKET TELEOPERATION LOGIC ---
+        if self.teleop_network_mode == 'leader':
+            # Read leader positions
+            leader_pos = []
+            for name, arm in zip(self.config.leader_arms.keys(), self.leader_arms):
+                before_lread_t = time.perf_counter()
+                pos = arm.read("Present_Position")
+                pos = torch.from_numpy(pos)
+                leader_pos.append(pos)
+                self.logs[f"read_leader_{name}_pos_dt_s"] = time.perf_counter() - before_lread_t
+            # Serialize and send all leader positions as a single float32 array
+            all_pos = torch.cat(leader_pos).numpy().astype('float32')
+            data = all_pos.tobytes()
+            # Send length prefix then data
+            try:
+                if self._teleop_socket:
+                    self._teleop_socket.sendall(struct.pack('I', len(data)))
+                    self._teleop_socket.sendall(data)
+            except Exception as e:
+                print(f"Socket send error: {e}")
+            if not record_data:
+                return
+            return None
+
+        elif self.teleop_network_mode == 'follower':
+            try:
+                # Receive leader positions and apply to follower
+                conn = self._teleop_conn or self._teleop_socket
+                if conn is None:
+                    print("No connection for teleop follower.")
+                    return
+                length_bytes = b''
+                while len(length_bytes) < 4:
+                    chunk = conn.recv(4 - len(length_bytes))
+                    if not chunk:
+                        raise RuntimeError("Socket closed while reading length prefix")
+                    length_bytes += chunk
+                data_len = struct.unpack('I', length_bytes)[0]
+                data = b''
+                while len(data) < data_len:
+                    chunk = conn.recv(data_len - len(data))
+                    if not chunk:
+                        raise RuntimeError("Socket closed while reading data")
+                    data += chunk
+                # Deserialize
+                n_follower = sum(len(arm.motor_names) for arm in self.follower_arms)  # type: ignore
+                arr = np.frombuffer(data, dtype='float32')
+                if arr.size != n_follower:
+                    print(f"Warning: received {arr.size} joints, expected {n_follower}")
+                # Split and write to each follower arm
+                idx = 0
+                follower_goal_pos = []
+                for name, arm in zip(self.config.follower_arms.keys(), self.follower_arms):
+                    n = len(arm.motor_names)  # type: ignore
+                    goal_pos = torch.from_numpy(arr[idx:idx+n])
+                    idx += n
+                    # Cap goal position if needed
+                    if self.config.max_relative_target is not None:
+                        present_pos = torch.from_numpy(arm.read("Present_Position"))
+                        goal_pos = ensure_safe_goal_position(goal_pos, present_pos, self.config.max_relative_target)
+                    # MIRRORING CORRECTION FOR SO100_BIMANUAL LEFT GRIPPER
+                    motor_names = arm.motor_names  # type: ignore
+                    if self.robot_type == "so100_bimanual" and name == "left":
+                        if "gripper" in motor_names:
+                            gripper_idx = motor_names.index("gripper")
+                            goal_pos = goal_pos.clone()
+                            goal_pos[gripper_idx] = -goal_pos[gripper_idx]
+                    follower_goal_pos.append(goal_pos)
+                    arm.write("Goal_Position", goal_pos.numpy().astype(np.float32))
+                if not record_data:
+                    return
+                # Read follower position for logging
+                follower_pos = []
+                for name, arm in zip(self.config.follower_arms.keys(), self.follower_arms):
+                    before_fread_t = time.perf_counter()
+                    pos = torch.from_numpy(arm.read("Present_Position"))
+                    follower_pos.append(pos)
+                    self.logs[f"read_follower_{name}_pos_dt_s"] = time.perf_counter() - before_fread_t
+                state = torch.cat(follower_pos)
+                action = torch.cat(follower_goal_pos)
+                obs_dict, action_dict = {}, {}
+                obs_dict["observation.state"] = state
+                action_dict["action"] = action
+                # Cameras (optional)
+                images = []
+                for cam in self.cameras:
+                    before_camread_t = time.perf_counter()
+                    img = cam.async_read()
+                    img = torch.from_numpy(img)
+                    images.append(img)
+                for i, cam in enumerate(self.cameras):
+                    cam_name = list(self.config.cameras.keys())[i] if hasattr(self.config, 'cameras') else str(i)
+                    obs_dict[f"observation.images.{cam_name}"] = images[i]
+                return obs_dict, action_dict
+            except Exception as e:
+                print(f"Socket receive error: {e}")
+                return
+        # --- END SOCKET TELEOPERATION LOGIC ---
+
+        # Fallback: local teleoperation (original logic)
+        leader_pos = []
+        for name, arm in zip(self.config.leader_arms.keys(), self.leader_arms):
             before_lread_t = time.perf_counter()
-            leader_pos[name] = self.leader_arms[name].read("Present_Position")
-            leader_pos[name] = torch.from_numpy(leader_pos[name])
+            pos = torch.from_numpy(arm.read("Present_Position"))
+            leader_pos.append(pos)
             self.logs[f"read_leader_{name}_pos_dt_s"] = time.perf_counter() - before_lread_t
-
-        # Send goal position to the follower
-        follower_goal_pos = {}
-        for name in self.follower_arms:
+        follower_goal_pos = []
+        for (f_name, f_arm), (l_name, l_pos) in zip(zip(self.config.follower_arms.keys(), self.follower_arms), zip(self.config.leader_arms.keys(), leader_pos)):
             before_fwrite_t = time.perf_counter()
-            goal_pos = leader_pos[name]
-
-            # Cap goal position when too far away from present position.
-            # Slower fps expected due to reading from the follower.
+            goal_pos = l_pos
             if self.config.max_relative_target is not None:
-                present_pos = self.follower_arms[name].read("Present_Position")
-                present_pos = torch.from_numpy(present_pos)
+                present_pos = torch.from_numpy(f_arm.read("Present_Position"))
                 goal_pos = ensure_safe_goal_position(goal_pos, present_pos, self.config.max_relative_target)
-
-            # MIRRORING CORRECTION FOR SO100_BIMANUAL LEFT GRIPPER
-            # The left gripper on so100_bimanual is physically mirrored, but we want the software
-            # to always treat it as non-mirrored. This flips the sign of the gripper goal position
-            # so that teleoperation and action commands are consistent regardless of hardware setup.
-            if self.robot_type == "so100_bimanual" and name == "left":
-                motor_names = self.follower_arms[name].motor_names
+            motor_names = f_arm.motor_names  # type: ignore
+            if self.robot_type == "so100_bimanual" and f_name == "left":
                 if "gripper" in motor_names:
                     gripper_idx = motor_names.index("gripper")
                     goal_pos = goal_pos.clone()
                     goal_pos[gripper_idx] = -goal_pos[gripper_idx]
-            # END MIRRORING CORRECTION
-
-            follower_goal_pos[name] = goal_pos
-            goal_pos = goal_pos.numpy().astype(np.float32)
-            self.follower_arms[name].write("Goal_Position", goal_pos)
-            self.logs[f"write_follower_{name}_goal_pos_dt_s"] = time.perf_counter() - before_fwrite_t
-
-        # Early exit when recording data is not requested
+            follower_goal_pos.append(goal_pos)
+            f_arm.write("Goal_Position", goal_pos.numpy().astype(np.float32))
+            self.logs[f"write_follower_{f_name}_goal_pos_dt_s"] = time.perf_counter() - before_fwrite_t
         if not record_data:
             return
-
-        # TODO(rcadene): Add velocity and other info
-        # Read follower position
-        follower_pos = {}
-        for name in self.follower_arms:
+        follower_pos = []
+        for name, arm in zip(self.config.follower_arms.keys(), self.follower_arms):
             before_fread_t = time.perf_counter()
-            follower_pos[name] = self.follower_arms[name].read("Present_Position")
-            follower_pos[name] = torch.from_numpy(follower_pos[name])
+            pos = torch.from_numpy(arm.read("Present_Position"))
+            follower_pos.append(pos)
             self.logs[f"read_follower_{name}_pos_dt_s"] = time.perf_counter() - before_fread_t
-
-        # Create state by concatenating follower current position
-        state = []
-        for name in self.follower_arms:
-            if name in follower_pos:
-                state.append(follower_pos[name])
-        state = torch.cat(state)
-
-        # Create action by concatenating follower goal position
-        action = []
-        for name in self.follower_arms:
-            if name in follower_goal_pos:
-                action.append(follower_goal_pos[name])
-        action = torch.cat(action)
-
-        # Capture images from cameras
-        images = {}
-        for name in self.cameras:
+        state = torch.cat(follower_pos)
+        action = torch.cat(follower_goal_pos)
+        images = []
+        for cam in self.cameras:
             before_camread_t = time.perf_counter()
-            images[name] = self.cameras[name].async_read()
-            images[name] = torch.from_numpy(images[name])
-            self.logs[f"read_camera_{name}_dt_s"] = self.cameras[name].logs["delta_timestamp_s"]
-            self.logs[f"async_read_camera_{name}_dt_s"] = time.perf_counter() - before_camread_t
-
-        # Populate output dictionaries
+            img = cam.async_read()
+            img = torch.from_numpy(img)
+            images.append(img)
         obs_dict, action_dict = {}, {}
         obs_dict["observation.state"] = state
         action_dict["action"] = action
-        for name in self.cameras:
-            obs_dict[f"observation.images.{name}"] = images[name]
-
+        for i, cam in enumerate(self.cameras):
+            cam_name = list(self.config.cameras.keys())[i] if hasattr(self.config, 'cameras') else str(i)
+            obs_dict[f"observation.images.{cam_name}"] = images[i]
         return obs_dict, action_dict
 
     def capture_observation(self):
@@ -605,7 +708,7 @@ class ManipulatorRobot:
             # to always treat it as non-mirrored. This flips the sign of the gripper goal position
             # so that teleoperation and action commands are consistent regardless of hardware setup.
             if self.robot_type == "so100_bimanual" and name == "left":
-                motor_names = self.follower_arms[name].motor_names
+                motor_names = self.follower_arms[name].motor_names  # type: ignore
                 if "gripper" in motor_names:
                     gripper_idx = motor_names.index("gripper")
                     goal_pos = goal_pos.clone()
@@ -625,16 +728,13 @@ class ManipulatorRobot:
             raise RobotDeviceNotConnectedError(
                 "ManipulatorRobot is not connected. You need to run `robot.connect()` before disconnecting."
             )
-
-        for name in self.follower_arms:
-            self.follower_arms[name].disconnect()
-
-        for name in self.leader_arms:
-            self.leader_arms[name].disconnect()
-
-        for name in self.cameras:
-            self.cameras[name].disconnect()
-
+        for arm in self.follower_arms:
+            arm.disconnect()  # type: ignore
+        for arm in self.leader_arms:
+            arm.disconnect()  # type: ignore
+        for cam in self.cameras:
+            cam.disconnect()  # type: ignore
+        self._close_teleop_socket()
         self.is_connected = False
 
     def __del__(self):
