@@ -17,8 +17,16 @@ def _recv_exact(sock: socket.socket, n: int) -> bytes:
         data += chunk
     return data
 
+def _motor_count(bus):
+    if hasattr(bus, "num_motors"):
+        return bus.num_motors
+    if hasattr(bus, "motors"):
+        return len(bus.motors)
+    if hasattr(bus, "motor_ids"):
+        return len(bus.motor_ids)
+    raise AttributeError("Cannot determine motor count for this bus")
 
-def spin(robot, seconds: float, frequency: float, mode: str, conn: socket.socket | None):
+def spin(robot, seconds: float | None, frequency: float, mode: str, conn: socket.socket | None):
     """
     Tele-op loop for `seconds` at `frequency` Hz.
 
@@ -37,9 +45,9 @@ def spin(robot, seconds: float, frequency: float, mode: str, conn: socket.socket
         raise RuntimeError("No arms available for the selected mode")
 
     # how many motors per arm (needed for packing / unpacking)
-    dims = {k: (robot.leader_arms[k].num_motors if mode != "follower"
-                else robot.follower_arms[k].num_motors)
-            for k in arm_keys}
+    dims = {k: (_motor_count(robot.leader_arms[k]) if mode != "follower"
+            else _motor_count(robot.follower_arms[k]))
+        for k in arm_keys}
 
     # byte-level header: [n_arms:uint8] + repeating
     #   [key_len:uint8][key_bytes][n_vals:uint8]
@@ -51,11 +59,16 @@ def spin(robot, seconds: float, frequency: float, mode: str, conn: socket.socket
         header_bytes.extend(key_b)
         header_bytes.append(dims[k])
 
-    period    = 1.0 / frequency
-    end_time  = time.perf_counter() + seconds
-    with tqdm.tqdm(total=seconds, unit="s", bar_format="{l_bar}{bar}| {n:.1f}/{total:.0f}{unit} ") as bar:
+    period = 1.0 / frequency
+    start_t  = time.perf_counter()
+    end_t = start_t + seconds if seconds is not None else float("inf")
+    with tqdm.tqdm(
+        total=seconds or float("inf"),
+        unit="s",
+        bar_format="{l_bar}{bar}| {n:.1f}/{total:.0f}{unit} " if seconds is not None else "{l_bar}{bar}| ∞ "
+    ) as bar:
         prev = time.perf_counter()
-        while time.perf_counter() < end_time:
+        while time.perf_counter() < end_t:
             t0 = time.perf_counter()
 
             if mode == "leader":
@@ -91,7 +104,8 @@ def spin(robot, seconds: float, frequency: float, mode: str, conn: socket.socket
 
             # progress-bar housekeeping & rate control
             now = time.perf_counter()
-            bar.update(now - prev)
+            if seconds is not None:
+                 bar.update(now - prev)
             prev = now
             time.sleep(max(0.0, period - (now - t0)))
 
@@ -100,10 +114,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=50007, required=True, help="Set socket configs")
     parser.add_argument("--network_mode", type=str, default="None", help="Set teleop network mode: leader, follower, or None")
+    parser.add_argument(
+    "-t", "--runtime", type=float, default=None,
+    help="Duration in seconds. Omit for infinite run (stop with Ctrl-C).",
+)
     args = parser.parse_args()
 
     robot_config = So100RobotConfig()
-
+    robot_config.cameras = {} #for now
     mode = args.network_mode.lower()
     conn = None
     if mode == "leader":
@@ -130,7 +148,7 @@ if __name__ == "__main__":
     robot.connect()  # establish connection before teleop
 
     try:
-        spin(robot, 10, 100, mode, conn)
+        spin(robot, args.runtime, 100, mode, conn)
     finally:
         if conn is not None:
             conn.close()
