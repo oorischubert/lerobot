@@ -616,7 +616,6 @@ class ManipulatorRobot:
             arm.disconnect()
         for cam in self.cameras.values():
             cam.disconnect()
-        self._close_teleop_socket()
         self.is_connected = False
 
     def __del__(self):

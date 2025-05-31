@@ -20,44 +20,80 @@ def _recv_exact(sock: socket.socket, n: int) -> bytes:
 
 def spin(robot, seconds: float, frequency: float, mode: str, conn: socket.socket | None):
     """
-    Run tele‑operation for *seconds* seconds at *frequency* Hz.
+    Tele-op loop for `seconds` at `frequency` Hz.
 
-    - mode == "leader": read positions from leader arm and stream to *conn*.
-    - mode == "follower": receive positions from *conn* and write to follower arm.
-    - mode == "None"   : local: copy leader → follower in the same process.
+    * leader   - sends all arms found in `robot.leader_arms`
+    * follower - receives data for all arms in `robot.follower_arms`
+    * None     - local mirroring for arm names present on both sides
     """
-    period = 1.0 / frequency
-    end_time = time.perf_counter() + seconds
-    with tqdm.tqdm(total=seconds, unit="s") as pbar:
-        last_update = time.perf_counter()
+    if mode == "leader":
+        arm_keys = list(robot.leader_arms.keys())
+    elif mode == "follower":
+        arm_keys = list(robot.follower_arms.keys())
+    else:                               # local
+        arm_keys = [k for k in robot.leader_arms if k in robot.follower_arms]
+
+    if not arm_keys:
+        raise RuntimeError("No arms available for the selected mode")
+
+    # how many motors per arm (needed for packing / unpacking)
+    dims = {k: (robot.leader_arms[k].num_motors if mode != "follower"
+                else robot.follower_arms[k].num_motors)
+            for k in arm_keys}
+
+    # byte-level header: [n_arms:uint8] + repeating
+    #   [key_len:uint8][key_bytes][n_vals:uint8]
+    header_bytes = bytearray()
+    header_bytes.append(len(arm_keys))
+    for k in arm_keys:
+        key_b = k.encode()
+        header_bytes.append(len(key_b))
+        header_bytes.extend(key_b)
+        header_bytes.append(dims[k])
+
+    period    = 1.0 / frequency
+    end_time  = time.perf_counter() + seconds
+    with tqdm.tqdm(total=seconds, unit="s", bar_format="{l_bar}{bar}| {n:.1f}/{total:.0f}{unit} ") as bar:
+        prev = time.perf_counter()
         while time.perf_counter() < end_time:
-            loop_start = time.perf_counter()
+            t0 = time.perf_counter()
 
             if mode == "leader":
-                leader_pos = robot.leader_arms["main"].read("Present_Position").astype(np.float32)
-                payload = leader_pos.tobytes()
-                conn.sendall(struct.pack('I', len(leader_pos)) + payload)
+                assert conn is not None
+                # concatenate all leader positions in the agreed order
+                blob = np.concatenate(
+                    [robot.leader_arms[k].read("Present_Position").astype(np.float32)
+                     for k in arm_keys]
+                ).tobytes()
+                conn.sendall(header_bytes + blob)
 
             elif mode == "follower":
-                # first 4 bytes = uint32 length
-                n = struct.unpack('I', _recv_exact(conn, 4))[0]
-                data = _recv_exact(conn, n * 4)
-                goal = np.frombuffer(data, dtype=np.float32)
-                robot.follower_arms["main"].write("Goal_Position", goal)
+                assert conn is not None
+                # read header only once per loop (it is fixed-size)
+                hdr = _recv_exact(conn, len(header_bytes))
+                data_len = sum(dims.values()) * 4  # float32 = 4 bytes
+                buf = _recv_exact(conn, data_len)
+                flat = np.frombuffer(buf, dtype=np.float32)
 
-            else:  # mode == "None"
-                leader_pos = robot.leader_arms["main"].read("Present_Position")
-                robot.follower_arms["main"].write("Goal_Position", leader_pos)
+                # slice and dispatch to each follower arm
+                idx = 0
+                for k in arm_keys:
+                    n = dims[k]
+                    robot.follower_arms[k].write("Goal_Position", flat[idx:idx+n])
+                    idx += n
 
-            # update progress bar
+            else:  # local mirror
+                for k in arm_keys:
+                    robot.follower_arms[k].write(
+                        "Goal_Position",
+                        robot.leader_arms[k].read("Present_Position"),
+                    )
+
+            # progress-bar housekeeping & rate control
             now = time.perf_counter()
-            pbar.update(now - last_update)
-            last_update = now
-
-            # maintain loop period
-            sleep_t = period - (time.perf_counter() - loop_start)
-            if sleep_t > 0:
-                time.sleep(sleep_t)
+            bar.update(now - prev)
+            prev = now
+            time.sleep(max(0.0, period - (now - t0)))
 
 if __name__ == "__main__":
 
@@ -68,14 +104,10 @@ if __name__ == "__main__":
 
     robot_config = So100RobotConfig()
 
-    robot = ManipulatorRobot(
-        robot_config,
-    )
-    robot.connect()  # establish connection before teleop
-
     mode = args.network_mode.lower()
     conn = None
     if mode == "leader":
+        robot_config.follower_arms={} # empty follower arm list
         srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         srv.bind(("0.0.0.0", args.port))
@@ -83,14 +115,24 @@ if __name__ == "__main__":
         print(f"[leader] waiting for follower on port {args.port} …")
         conn, _ = srv.accept()
         print("[leader] follower connected")
+        assert conn is not None
     elif mode == "follower":
+        robot_config.leader_arms={} # empty leader arm list
         conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         print(f"[follower] connecting to leader on port {args.port} …")
-        conn.connect(("localhost", args.port))
+        conn.connect(("100.87.198.21", args.port))
         print("[follower] connected")
+        assert conn is not None
+
+    robot = ManipulatorRobot(
+        robot_config,
+    )
+    robot.connect()  # establish connection before teleop
 
     try:
         spin(robot, 10, 100, mode, conn)
     finally:
         if conn is not None:
             conn.close()
+            
+# python -m lerobot.scripts.network_teleop --port <port> --network_mode <mode>
