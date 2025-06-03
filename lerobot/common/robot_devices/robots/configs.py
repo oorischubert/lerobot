@@ -505,7 +505,7 @@ class So100BimanualRobotConfig(ManipulatorRobotConfig):
     leader_arms: dict[str, MotorsBusConfig] = field(
         default_factory=lambda: {
             "left": FeetechMotorsBusConfig(
-                port="/dev/tty.usbmodem58FA0964001", # Oori Leader Left
+                port="leftLeaderPort", # Oori Leader Left
                 motors={
                     # name: (index, model)
                     "shoulder_pan": [1, "sts3215"],
@@ -517,7 +517,7 @@ class So100BimanualRobotConfig(ManipulatorRobotConfig):
                 }, # type: ignore
             ),
             "right": FeetechMotorsBusConfig(
-                port="/dev/tty.usbmodem575E0031751",
+                port="rightLeaderPort",
                 motors={
                     # name: (index, model)
                     "shoulder_pan": [1, "sts3215"],
@@ -534,7 +534,7 @@ class So100BimanualRobotConfig(ManipulatorRobotConfig):
     follower_arms: dict[str, MotorsBusConfig] = field(
         default_factory=lambda: {
             "left": FeetechMotorsBusConfig(
-                port="/dev/tty.usbmodem58FA0957951", # Oori Follower Left
+                port="leftFollowerPort", # Oori Follower Left
                 motors={
                     # name: (index, model)
                     "shoulder_pan": [1, "sts3215"],
@@ -546,7 +546,7 @@ class So100BimanualRobotConfig(ManipulatorRobotConfig):
                 }, # type: ignore
             ),
             "right": FeetechMotorsBusConfig(
-                port="/dev/tty.usbmodem575E0032081",
+                port="rightFollowerPort",
                 motors={
                     # name: (index, model)
                     "shoulder_pan": [1, "sts3215"],

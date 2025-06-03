@@ -3,9 +3,11 @@ from lerobot.common.robot_devices.robots.manipulator import ManipulatorRobot
 import argparse
 import tqdm
 import socket
-import struct
 import time
 import numpy as np
+
+LEADER_ADDR = "100.87.198.21" # telepi
+UPDATE_FREQ = 50
 
 def _recv_exact(sock: socket.socket, n: int) -> bytes:
     """Receive exactly *n* bytes or raise RuntimeError if the peer closes."""
@@ -113,7 +115,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=50007, required=True, help="Set socket configs")
-    parser.add_argument("--network_mode", type=str, default="None", help="Set teleop network mode: leader, follower, or None")
+    parser.add_argument("--mode",type=str, default="None", help="Set teleop network mode: leader, follower, or None")
     parser.add_argument(
     "-t", "--runtime", type=float, default=None,
     help="Duration in seconds. Omit for infinite run (stop with Ctrl-C).",
@@ -121,11 +123,11 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     robot_config = So100RobotConfig()
-    robot_config.cameras = {} #for now
-    mode = args.network_mode.lower()
+    mode = args.mode.lower()
     conn = None
     if mode == "leader":
         robot_config.follower_arms={} # empty follower arm list
+        robot_config.cameras={} # empty camera list
         srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         srv.bind(("0.0.0.0", args.port))
@@ -138,7 +140,7 @@ if __name__ == "__main__":
         robot_config.leader_arms={} # empty leader arm list
         conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         print(f"[follower] connecting to leader on port {args.port} …")
-        conn.connect(("100.87.198.21", args.port))
+        conn.connect((LEADER_ADDR, args.port))
         print("[follower] connected")
         assert conn is not None
 
@@ -148,9 +150,9 @@ if __name__ == "__main__":
     robot.connect()  # establish connection before teleop
 
     try:
-        spin(robot, args.runtime, 100, mode, conn)
+        spin(robot, args.runtime, UPDATE_FREQ, mode, conn)
     finally:
         if conn is not None:
             conn.close()
             
-# python -m lerobot.scripts.network_teleop --port <port> --network_mode <mode>
+# python -m lerobot.scripts.network_teleop --port <port> --mode <mode> -t <s>
