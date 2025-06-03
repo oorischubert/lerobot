@@ -1,10 +1,11 @@
-from lerobot.common.robot_devices.robots.configs import So100RobotConfig
+from lerobot.common.robot_devices.robots.configs import So100RobotConfig, So100BimanualRobotConfig
 from lerobot.common.robot_devices.robots.manipulator import ManipulatorRobot
 import argparse
 import tqdm
 import socket
 import time
 import numpy as np
+import sys
 
 LEADER_ADDR = "100.87.198.21" # telepi
 UPDATE_FREQ = 50
@@ -116,13 +117,20 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=50007, required=True, help="Set socket configs")
     parser.add_argument("--mode",type=str, default="None", help="Set teleop network mode: leader, follower, or None")
+    parser.add_argument("--robot",type=str, default="so100", help="Robot type: [so100, so100_bimanual]")
     parser.add_argument(
     "-t", "--runtime", type=float, default=None,
     help="Duration in seconds. Omit for infinite run (stop with Ctrl-C).",
 )
     args = parser.parse_args()
-
-    robot_config = So100RobotConfig()
+    if args.robot == "so100":
+        robot_config = So100RobotConfig()
+    elif args.robot == "so100_bimanual":
+        robot_config = So100BimanualRobotConfig()
+    else:
+        print("Robot not integrated, select from: [so100, so100_bimanual]")
+        sys.exit(1)
+        
     mode = args.mode.lower()
     conn = None
     if mode == "leader":
@@ -132,14 +140,14 @@ if __name__ == "__main__":
         srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         srv.bind(("0.0.0.0", args.port))
         srv.listen(1)
-        print(f"[leader] waiting for follower on port {args.port} …")
+        print(f"[leader] waiting for follower/s on port {args.port} …")
         conn, _ = srv.accept()
         print("[leader] follower connected")
         assert conn is not None
     elif mode == "follower":
         robot_config.leader_arms={} # empty leader arm list
         conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        print(f"[follower] connecting to leader on port {args.port} …")
+        print(f"[follower] connecting to leader/s on port {args.port} …")
         conn.connect((LEADER_ADDR, args.port))
         print("[follower] connected")
         assert conn is not None
@@ -154,5 +162,6 @@ if __name__ == "__main__":
     finally:
         if conn is not None:
             conn.close()
-            
-# python -m lerobot.scripts.network_teleop --port <port> --mode <mode> -t <s>
+
+# Running network_teleop:  
+# python -m lerobot.scripts.network_teleop --port <port> --robot <robot> --mode <mode> -t <s>
