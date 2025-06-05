@@ -133,6 +133,9 @@ if __name__ == "__main__":
         
     mode = args.mode.lower()
     conn = None
+    
+    robot_config.cameras={} # temp!
+    
     if mode == "leader":
         robot_config.follower_arms={} # empty follower arm list
         robot_config.cameras={} # empty camera list
